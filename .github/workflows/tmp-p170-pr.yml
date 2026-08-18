@@ -1,0 +1,35 @@
+name: Temporary P170 PR Runner
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      P170_PRODUCER_BASE_SHA: 979e947f5d82ac06477ce4f87f95a7f93e6d2997
+    steps:
+      - uses: actions/checkout@v4
+      - name: Runtime
+        run: |
+          python3 --version
+          ffmpeg -version | head -n 2
+          ffprobe -version | head -n 2
+      - name: Measure
+        run: |
+          python3 p170-real-flac-stereo-strike.py --output p170-evidence.json
+          cat p170-evidence.json
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p170-evidence
+          path: p170-evidence.json
+          if-no-files-found: warn
+          retention-days: 1
