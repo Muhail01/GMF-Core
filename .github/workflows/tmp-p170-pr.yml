@@ -16,6 +16,10 @@ jobs:
       P170_PRODUCER_BASE_SHA: 979e947f5d82ac06477ce4f87f95a7f93e6d2997
     steps:
       - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
       - name: Runtime
         run: |
           python3 --version
