@@ -1,0 +1,124 @@
+name: Temporary P170 Real FLAC Stereo Runner
+
+on:
+  push:
+    branches:
+      - tmp-p170-real-flac-stereo
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Measure original real FLAC candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import array, hashlib, json, math, subprocess, sys, urllib.parse, urllib.request
+          from pathlib import Path
+
+          CANDIDATES = [
+            {
+              'id': 'postcard-piano',
+              'title': 'Postcardwithaballoon-tobefree.flac',
+              'source_page': 'https://commons.wikimedia.org/wiki/File:Postcardwithaballoon-tobefree.flac',
+              'provenance': 'real piano performance played by composer',
+            },
+            {
+              'id': 'schwarze-piano',
+              'title': 'Schwarzesanduhr-tobefree.flac',
+              'source_page': 'https://commons.wikimedia.org/wiki/File:Schwarzesanduhr-tobefree.flac',
+              'provenance': 'real piano performance played by composer',
+            },
+            {
+              'id': 'mode-de-re',
+              'title': 'Mode de ré.flac',
+              'source_page': 'https://commons.wikimedia.org/wiki/File:Mode_de_r%C3%A9.flac',
+              'provenance': 'Wikimedia own-work musical audio',
+            },
+          ]
+          FLOOR = 1e-6
+          out = {'mission':'P170','side_energy_materiality_floor':FLOOR,'candidates':[],'selected':None,'FLAC_AXIS':'BLOCKED','GENUINE_STEREO_AXIS':'BLOCKED'}
+          wd = Path('/tmp/p170'); wd.mkdir(exist_ok=True)
+
+          def cmd(args):
+            p=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True)
+            return p.stdout
+
+          def download(c,path):
+            name=urllib.parse.quote(c['title'],safe='')
+            url=f'https://commons.wikimedia.org/wiki/Special:Redirect/file/{name}'
+            req=urllib.request.Request(url,headers={'User-Agent':'LAUT-P170/1.0'})
+            h=hashlib.sha256(); n=0; first=b''
+            with urllib.request.urlopen(req,timeout=180) as r, open(path,'wb') as f:
+              final=r.geturl(); ct=r.headers.get('Content-Type')
+              while True:
+                b=r.read(1024*1024)
+                if not b: break
+                if len(first)<4: first += b[:4-len(first)]
+                h.update(b); f.write(b); n += len(b)
+            return {'request_url':url,'final_url':final,'content_type':ct,'bytes':n,'sha256':h.hexdigest(),'magic_ascii':first[:4].decode('ascii','replace'),'magic_hex':first[:4].hex()}
+
+          def probe(path):
+            data=json.loads(cmd(['ffprobe','-v','error','-show_entries','format=format_name,duration,size,bit_rate:stream=index,codec_name,codec_long_name,codec_type,sample_fmt,sample_rate,channels,channel_layout,bits_per_sample,bits_per_raw_sample','-of','json',str(path)]))
+            streams=[s for s in data.get('streams',[]) if s.get('codec_type')=='audio']
+            if len(streams)!=1: raise RuntimeError(f'audio streams={len(streams)}')
+            return data.get('format',{}),streams[0]
+
+          def metrics(path):
+            raw=cmd(['ffmpeg','-v','error','-nostdin','-i',str(path),'-map','0:a:0','-f','s32le','-acodec','pcm_s32le','pipe:1'])
+            a=array.array('i'); a.frombytes(raw)
+            if sys.byteorder!='little': a.byteswap()
+            if len(a)%2: raise RuntimeError('odd interleaved sample count')
+            n=len(a)//2
+            sx=sy=sxx=syy=sxy=0
+            mid=side=lr=0
+            diff=0
+            for i in range(0,len(a),2):
+              x=int(a[i]); y=int(a[i+1])
+              if x!=y: diff+=1
+              sx+=x; sy+=y; sxx+=x*x; syy+=y*y; sxy+=x*y
+              sm=x+y; sd=x-y
+              mid+=sm*sm; side+=sd*sd; lr+=x*x+y*y
+            denx=n*sxx-sx*sx; deny=n*syy-sy*sy
+            corr=(n*sxy-sx*sy)/math.sqrt(denx*deny) if denx>0 and deny>0 else None
+            sr=side/(mid+side) if mid+side>0 else None
+            return {'decoded_frames':n,'left_right_identical':diff==0,'differing_frames':diff,'differing_frame_fraction':diff/n if n else None,'channel_correlation':corr,'mid_energy_integer':str(mid),'side_energy_integer':str(side),'side_energy_ratio':sr,'lr_difference_energy_integer':str(side),'lr_total_energy_integer':str(lr),'lr_difference_energy_ratio':side/lr if lr else None,'nonzero_lr_difference_energy':side>0}
+
+          for c in CANDIDATES:
+            r={'candidate':c}
+            try:
+              path=wd/(c['id']+'.flac')
+              physical=download(c,path)
+              fmt,st=probe(path)
+              native=(physical['magic_ascii']=='fLaC' and st.get('codec_name')=='flac' and 'flac' in fmt.get('format_name','').split(',') and physical['bytes']>0 and 'upload.wikimedia.org' in physical['final_url'])
+              r.update({'physical':physical,'format':fmt,'stream':st,'flac_source_bytes_pass':native,'stereo':None,'genuine_stereo_pass':False})
+              if native and int(st.get('channels',0))==2:
+                m=metrics(path); r['stereo']=m
+                genuine=(not m['left_right_identical'] and m['nonzero_lr_difference_energy'] and m['side_energy_ratio'] is not None and m['side_energy_ratio']>=FLOOR and m['channel_correlation'] is not None and math.isfinite(m['channel_correlation']))
+                r['genuine_stereo_pass']=genuine
+              print('P170_CANDIDATE='+json.dumps(r,ensure_ascii=False),flush=True)
+            except Exception as e:
+              r.update({'flac_source_bytes_pass':False,'genuine_stereo_pass':False,'error':f'{type(e).__name__}: {e}'})
+              print('P170_CANDIDATE='+json.dumps(r,ensure_ascii=False),flush=True)
+            out['candidates'].append(r)
+            if r.get('flac_source_bytes_pass') and r.get('genuine_stereo_pass'):
+              out['selected']=r; out['FLAC_AXIS']='PASS'; out['GENUINE_STEREO_AXIS']='PASS'; break
+
+          Path('p170-evidence.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print('P170_EVIDENCE='+json.dumps(out,ensure_ascii=False),flush=True)
+          if out['FLAC_AXIS']!='PASS' or out['GENUINE_STEREO_AXIS']!='PASS': raise SystemExit(2)
+          PY
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p170-evidence
+          path: p170-evidence.json
+          if-no-files-found: warn
+          retention-days: 1
